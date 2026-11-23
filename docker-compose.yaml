@@ -1,0 +1,245 @@
+# Postiz + automatische Reel-Rotation für Instagram Trial Reels
+# Basiert auf github.com/gitroomhq/postiz-docker-compose, angepasst:
+#  - Secrets aus .env
+#  - eigener cloudflared-Container (kein Port-Forwarding nötig)
+#  - nur Instagram (via Facebook Login) konfiguriert
+#  - Postiz wartet beim Start auf Temporal
+#  - Reel-Rotation als eigener Service
+#
+# Vor dem Start ersetzen:
+#  - postiz.deinedomain.de  → deine Domain
+#  - DEINE_META_APP_ID      → App-ID deiner Meta-App
+#  - ./media                → am besten ein Ordner auf einer großen Platte
+
+services:
+  postiz:
+    image: ghcr.io/gitroomhq/postiz-app:latest
+    container_name: postiz
+    restart: always
+    # Nach einem Reboot startet Docker alle Container gleichzeitig (depends_on greift dann nicht).
+    # Startet der Orchestrator vor Temporal, verbindet er sich nie neu und es wird nichts
+    # veröffentlicht. Deshalb erst auf Temporal warten, dann den Original-Befehl des Images starten.
+    command:
+      - sh
+      - -c
+      - |
+        until node -e "require('net').connect(7233,'temporal').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"; do
+          echo "warte auf Temporal ..."; sleep 3
+        done
+        sleep 10
+        nginx && pnpm run pm2
+    environment:
+      MAIN_URL: 'https://postiz.deinedomain.de'
+      FRONTEND_URL: 'https://postiz.deinedomain.de'
+      NEXT_PUBLIC_BACKEND_URL: 'https://postiz.deinedomain.de/api'
+      BACKEND_INTERNAL_URL: 'http://localhost:3000'
+      JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: 'postgresql://postiz-user:${POSTGRES_PASSWORD}@postiz-postgres:5432/postiz-db-local'
+      REDIS_URL: 'redis://postiz-redis:6379'
+      TEMPORAL_ADDRESS: 'temporal:7233'
+      IS_GENERAL: 'true'
+      # Nach dem Anlegen deines eigenen Accounts in der .env auf true setzen und neu starten
+      DISABLE_REGISTRATION: ${DISABLE_REGISTRATION:-false}
+      RUN_CRON: 'true'
+
+      STORAGE_PROVIDER: 'local'
+      UPLOAD_DIRECTORY: '/uploads'
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: '/uploads'
+
+      # Instagram (Facebook Business)
+      FACEBOOK_APP_ID: 'DEINE_META_APP_ID'
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET}
+
+      API_LIMIT: 30
+      NX_ADD_PLUGINS: 'false'
+    volumes:
+      - postiz-config:/config/
+      - ./media/uploads:/uploads/
+    ports:
+      - "4007:5000"   # optional: lokaler Zugriff im LAN
+    networks:
+      - postiz-network
+      - temporal-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "const r=require('http').get('http://localhost:5000/',res=>process.exit(res.statusCode<500?0:1));r.on('error',()=>process.exit(1));r.setTimeout(4000,()=>{r.destroy();process.exit(1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    depends_on:
+      postiz-postgres:
+        condition: service_healthy
+      postiz-redis:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+
+  # Cloudflare-Tunnel → Public Hostname postiz.deinedomain.de → http://postiz:5000
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: postiz-cloudflared
+    restart: always
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    networks:
+      - postiz-network
+    depends_on:
+      - postiz
+
+  # Reel-Rotation: plant Reels aus ./media/reels als Trial Reels ein (siehe README)
+  reel-rotation:
+    build: ./rotation
+    image: postiz-reel-rotation:local
+    container_name: postiz-reel-rotation
+    restart: always
+    # root, weil Postiz die Upload-Ordner als root anlegt und die Rotation dort Hardlinks setzt.
+    # Eigene Dateien (state.json, variants/) gibt sie per FILE_OWNER an deinen User zurück.
+    user: "0:0"
+    environment:
+      HOME: /tmp
+      POSTIZ_API_URL: 'http://postiz:5000/api/public/v1'
+      POSTIZ_API_KEY: ${POSTIZ_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SLOTS: '12:00,18:00'
+      TIMEZONE: 'Europe/Berlin'
+      GRADUATION_STRATEGY: 'MANUAL'
+      CAPTION_VARIANTS: 4
+      LOOKAHEAD_HOURS: 36
+      REELS_DIR: /postiz/reels
+      UPLOADS_DIR: /postiz/uploads
+      FILE_OWNER: '1000:1000'   # uid:gid deines Users (Befehl: id)
+    volumes:
+      - ./rotation:/rotation
+      # reels/ und uploads/ müssen im SELBEN Mount liegen, sonst gehen keine Hardlinks.
+      - ./media:/postiz
+    networks:
+      - postiz-network
+    depends_on:
+      postiz:
+        condition: service_healthy
+
+  postiz-postgres:
+    image: postgres:17-alpine
+    container_name: postiz-postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: postiz-user
+      POSTGRES_DB: postiz-db-local
+    volumes:
+      - postgres-volume:/var/lib/postgresql/data
+    networks:
+      - postiz-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postiz-user -d postiz-db-local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  postiz-redis:
+    image: redis:7.2
+    container_name: postiz-redis
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    volumes:
+      - postiz-redis-data:/data
+    networks:
+      - postiz-network
+
+  # -----------------------
+  # Temporal Stack (von Postiz für geplante Posts benötigt)
+  # -----------------------
+  temporal-elasticsearch:
+    container_name: temporal-elasticsearch
+    image: elasticsearch:7.17.27
+    restart: always
+    environment:
+      - cluster.routing.allocation.disk.threshold_enabled=true
+      - cluster.routing.allocation.disk.watermark.low=512mb
+      - cluster.routing.allocation.disk.watermark.high=256mb
+      - cluster.routing.allocation.disk.watermark.flood_stage=128mb
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+      - xpack.security.enabled=false
+    networks:
+      - temporal-network
+    expose:
+      - 9200
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS \"http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s\" || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    volumes:
+      - temporal-elasticsearch-data:/usr/share/elasticsearch/data
+
+  temporal-postgresql:
+    container_name: temporal-postgresql
+    image: postgres:16
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+    networks:
+      - temporal-network
+    expose:
+      - 5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - temporal-postgres-data:/var/lib/postgresql/data
+
+  temporal:
+    container_name: temporal
+    restart: always
+    image: temporalio/auto-setup:1.28.1
+    depends_on:
+      temporal-postgresql:
+        condition: service_healthy
+      temporal-elasticsearch:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - ENABLE_ES=true
+      - ES_SEEDS=temporal-elasticsearch
+      - ES_VERSION=v7
+      - TEMPORAL_NAMESPACE=default
+    networks:
+      - temporal-network
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+
+volumes:
+  postgres-volume:
+  postiz-redis-data:
+  postiz-config:
+  temporal-postgres-data:
+  temporal-elasticsearch-data:
+
+networks:
+  postiz-network:
+  temporal-network:
+    driver: bridge

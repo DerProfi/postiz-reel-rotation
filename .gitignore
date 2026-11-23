@@ -1,0 +1,5 @@
+.env
+media/
+rotation/node_modules/
+rotation/data/
+rotation/variants/
