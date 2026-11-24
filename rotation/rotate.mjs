@@ -48,9 +48,9 @@ const MIN_LEAD_MINUTES = Number(process.env.MIN_LEAD_MINUTES || 20);
 const CHECK_INTERVAL_MINUTES = Number(process.env.CHECK_INTERVAL_MINUTES || 10);
 const GRADUATION_STRATEGY = process.env.GRADUATION_STRATEGY || "MANUAL";
 const CAPTION_VARIANTS = Number(process.env.CAPTION_VARIANTS || 4);
-// Original-Caption mitrotieren? Standard: nein. Die Reels liefen schon mit dem Original,
-// Instagram stuft dieselbe Caption dann als „zu ähnlich“ ein.
-const USE_ORIGINAL_CAPTION = process.env.USE_ORIGINAL_CAPTION === "true";
+// Original-Caption mitrotieren? Standard: ja (für neue Videos gedacht). Lief ein Reel schon mit
+// dem Original auf deinem Account, auf "false" setzen: Instagram stuft dieselbe Caption sonst als „zu ähnlich“ ein.
+const USE_ORIGINAL_CAPTION = process.env.USE_ORIGINAL_CAPTION !== "false";
 
 const DRY_RUN = process.env.DRY_RUN === "true" || process.argv.includes("--dry-run");
 const POST_NOW = process.argv.includes("--post-now");
