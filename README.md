@@ -62,7 +62,7 @@ Postiz besteht aus sieben Containern: Postiz selbst, eine Postgres-Datenbank, Re
 
 1. Repo klonen und Ordner für Videos anlegen:
    ```
-   git clone <URL dieses Repos> postiz && cd postiz
+   git clone https://github.com/DerProfi/postiz-reel-rotation.git postiz && cd postiz
    mkdir -p media/reels media/uploads
    ```
    `media/` sollte auf einer großen Platte liegen. Entweder klonst du das Repo direkt dorthin oder du ersetzt `./media` in der Compose-Datei durch einen absoluten Pfad.
@@ -128,8 +128,11 @@ Einstellungen stehen in der `docker-compose.yaml` beim Service `reel-rotation`:
 | `GRADUATION_STRATEGY` | `MANUAL` | `MANUAL`: du gibst in der App an Follower frei. `SS_PERFORMANCE`: Instagram entscheidet nach Performance. |
 | `CAPTION_VARIANTS` | `4` | Anzahl Claude-Varianten, `0` = aus |
 | `LOOKAHEAD_HOURS` | `36` | wie weit im Voraus eingeplant wird |
-| `USE_ORIGINAL_CAPTION` | `false` | Original-Caption mitrotieren |
+| `USE_ORIGINAL_CAPTION` | `true` | Original-Caption mitrotieren. Auf `false` setzen, wenn das Video mit dieser Caption schon auf deinem Account lief. |
 | `TRANSCODE` | `true` | Videos vor dem Upload auf Instagram-Format rechnen |
+| `INSTAGRAM_INTEGRATION_ID` | leer | fester Instagram-Kanal in Postiz. Leer = erster aktiver Instagram-Kanal. |
+| `MIN_LEAD_MINUTES` | `20` | Mindestabstand zwischen jetzt und einem neu eingeplanten Slot |
+| `CHECK_INTERVAL_MINUTES` | `10` | wie oft die Rotation nach freien Slots schaut |
 
 ## Wie die Rotation arbeitet
 
@@ -139,7 +142,7 @@ Das Script prüft alle 10 Minuten, ob in den nächsten 36 Stunden ein Slot frei 
 
 1. Reels einlesen: jede `name.mp4` mit einer nicht leeren `name.txt` daneben. Ohne Caption wird ein Reel übersprungen.
 2. Reel wählen: das, das am längsten nicht dran war. Nie gepostete kommen zuerst.
-3. Caption wählen: beim ersten Einsatz schreibt Claude vier Varianten nach `rotation/variants/name.json`, danach rotiert das Script durch diese Varianten.
+3. Caption wählen: beim ersten Einsatz schreibt Claude vier Varianten nach `rotation/variants/name.json`, danach rotiert das Script durch Original und Varianten (mit `USE_ORIGINAL_CAPTION=false` nur durch die Varianten).
 4. Video umrechnen und hochladen (siehe unten), dann den Post anlegen.
 5. Alles in `rotation/data/state.json` merken, damit kein Slot doppelt belegt und kein Video doppelt hochgeladen wird.
 
